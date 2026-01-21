@@ -1,0 +1,32 @@
+[
+  {
+    "id": 1,
+    "query": "What are the main types of machine learning?",
+    "ground_truth_answer": "The main types of machine learning are supervised learning (using labeled data), unsupervised learning (finding patterns in unlabeled data), and reinforcement learning (learning through interaction with an environment).",
+    "ground_truth_contexts": ["supervised learning", "unsupervised learning", "reinforcement learning"]
+  },
+  {
+    "id": 2,
+    "query": "What is the difference between precision and recall in machine learning?",
+    "ground_truth_answer": "Precision is the ratio of true positives to all predicted positives (TP/(TP+FP)), while recall is the ratio of true positives to all actual positives (TP/(TP+FN)). Precision measures accuracy of positive predictions, while recall measures coverage of actual positives.",
+    "ground_truth_contexts": ["precision", "recall", "true positives", "false positives", "false negatives"]
+  },
+  {
+    "id": 3,
+    "query": "What are the steps in the data science process?",
+    "ground_truth_answer": "The data science process includes: 1) Problem Definition, 2) Data Collection, 3) Exploratory Data Analysis, 4) Data Preprocessing, 5) Feature Engineering, 6) Model Selection and Training, 7) Model Evaluation, and 8) Deployment and Monitoring.",
+    "ground_truth_contexts": ["problem definition", "data collection", "EDA", "preprocessing", "feature engineering", "model training", "evaluation", "deployment"]
+  },
+  {
+    "id": 4,
+    "query": "What are LSTM and GRU networks used for?",
+    "ground_truth_answer": "LSTM (Long Short-Term Memory) and GRU (Gated Recurrent Unit) are types of recurrent neural networks designed to handle sequential data and overcome the vanishing gradient problem. They are particularly effective at capturing long-term dependencies in sequences.",
+    "ground_truth_contexts": ["LSTM", "GRU", "RNN", "sequential data", "long-term dependencies"]
+  },
+  {
+    "id": 5,
+    "query": "What is the purpose of dropout in deep learning?",
+    "ground_truth_answer": "Dropout is a regularization technique used during training where random neurons are 'dropped out' (set to zero) with a certain probability. This prevents co-adaptation of neurons and helps reduce overfitting by forcing the network to learn more robust features.",
+    "ground_truth_contexts": ["dropout", "regularization", "overfitting", "neurons"]
+  }
+]

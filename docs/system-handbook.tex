@@ -1,0 +1,607 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{fancyhdr}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{color}
+\usepackage{url}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{pifont}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Document QA System}
+\lhead{System Handbook}
+\cfoot{\thepage}
+
+\setlist{leftmargin=1.2em}
+\setcounter{secnumdepth}{3}
+\setcounter{tocdepth}{3}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  showstringspaces=false
+}
+
+\title{Document QA System Handbook\\\large Architecture, Operations, and Development Guide}
+\author{Project Team}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Executive Summary}
+This handbook provides a comprehensive, end-to-end guide to the Document QA System. It explains the architecture, components, data flow, deployment modes (standalone and Docker), operational procedures, troubleshooting steps, and development practices. The intent is to allow a new team member to understand, run, and extend the system without prior context.
+
+\subsection{Key Capabilities}
+\begin{itemize}
+  \item Multi-format ingestion: TXT, PDF, CSV, XLSX, PPTX, images (OCR).
+  \item Chunking and embedding: SentenceTransformer embeddings, 384 dimensions.
+  \item Vector storage: Weaviate v4 (remote or Docker service).
+  \item LLM integration: Ollama (e.g., Mistral) for answer synthesis.
+  \item API: FastAPI service with /health and /ask endpoints.
+  \item Tooling: Demos, tests, evaluation scripts, Docker orchestration, and verification helpers.
+\end{itemize}
+
+\subsection{Two Operating Modes}
+\begin{description}
+  \item[Standalone (no Docker)] Embedding-based semantic search works immediately; Weaviate and Ollama are optional. Good for development and offline demos.
+  \item[Docker Full Stack] Runs Weaviate + Ollama + FastAPI + MLflow. Recommended for full functionality and production-like flows.
+\end{description}
+
+\newpage
+\section{Repository Map}
+\begin{longtable}{p{0.28\linewidth}p{0.65\linewidth}}
+\toprule
+Path & Description \\
+\midrule
+src/main.py & FastAPI entrypoint; defines routes (/ , /health, /ask). \\
+src/qa_agent.py & Orchestrates loading, retrieval, and answer synthesis. \\
+src/vector_store.py & Weaviate v4 client: schema init, insert, query, delete. \\
+src/document_loader.py & Multi-format loader (pypdf, pdf2image+pytesseract, pandas, pptx). \\
+src/embeddings.py & SentenceTransformer embeddings; similarity helper. \\
+src/llm_interface.py & Ollama LLM client (HTTP). \\
+src/query_decomposer.py & Splits complex questions into sub-questions. \\
+src/answer_synthesizer.py & Combines contexts, calls LLM, formats answers. \\
+src/config.py & Central config (env-backed): URLs, models, chunking params, paths. \\
+\midrule
+data/ & Sample documents and test cases. \\
+requirements.txt & Python dependencies. \\
+Dockerfile & Builds the app image (Python 3.11-slim). \\
+docker-compose.yml & Orchestrates Weaviate, Ollama, app, MLflow, init helper. \\
+startup.sh & Waits for services, then launches uvicorn. \\
+init-ollama.sh & Pulls the mistral model inside Ollama container. \\
+start_docker.py & One-command Docker startup helper. \\
+verify_docker.py & Checks Docker, services, endpoints. \\
+demo_qa.py & Standalone semantic-search demo. \\
+test_system.py & Basic health and component tests. \\
+final_test.py & Comprehensive end-to-end test suite. \\
+DOCKER_GUIDE.md & Docker usage and troubleshooting. \\
+DOCKER_READY.md & Deployment readiness notes. \\
+COMPLETION_SUMMARY.md & Change log and status. \\
+VERIFICATION_REPORT.txt & Latest verification summary. \\
+QUICK_REFERENCE.md & Quick start and cheat-sheet. \\
+\bottomrule
+\end{longtable}
+
+\newpage
+\section{Architecture Overview}
+\subsection{High-Level Flow}
+\begin{enumerate}
+  \item Ingest documents (multi-format) via DocumentLoader.
+  \item Chunk text with RecursiveCharacterTextSplitter.
+  \item Embed chunks using SentenceTransformer (default: all-MiniLM-L6-v2, 384 dims).
+  \item Store vectors in Weaviate v4 collection \texttt{DocumentChunk} (if available).
+  \item For a query: embed query, vector search top-$k$, optionally decompose query, synthesize answer via LLM, return contexts and answer.
+\end{enumerate}
+
+\subsection{Components}
+\begin{description}
+  \item[FastAPI] Serves /health, /ask, and docs; runs uvicorn.
+  \item[Embeddings] SentenceTransformer model; cosine similarity.
+  \item[Vector Store] Weaviate v4; stores chunk vectors and metadata.
+  \item[LLM] Ollama (e.g., Mistral) for generation and query decomposition.
+  \item[Chunking] RecursiveCharacterTextSplitter with configurable size/overlap.
+  \item[Storage] Local data/reports/evaluation folders, plus Weaviate for vectors.
+\end{description}
+
+\subsection{Key Config (src/config.py)}
+\begin{itemize}
+  \item WEAVIATE\_URL (default: http://localhost:8080)
+  \item WEAVIATE\_API\_KEY (default: weaviate\_key; not used unless enabled)
+  \item LLM\_BASE\_URL (default: http://localhost:11434)
+  \item LLM\_MODEL (default: mistral)
+  \item EMBEDDING\_MODEL (default: all-MiniLM-L6-v2)
+  \item API\_HOST / API\_PORT (default: 0.0.0.0 / 8000)
+  \item CHUNK\_SIZE / CHUNK\_OVERLAP (default: 1024 / 100)
+\end{itemize}
+
+\newpage
+\section{Data Ingestion}
+\subsection{Supported Formats}
+\begin{itemize}
+  \item Text: .txt
+  \item PDF: via pypdf; optional images via pdf2image + pytesseract.
+  \item Spreadsheets: .csv, .xlsx via pandas.
+  \item Presentations: .pptx via python-pptx.
+  \item Images: .png, .jpg, .jpeg via pytesseract OCR.
+\end{itemize}
+
+\subsection{Loader Behavior}
+\begin{enumerate}
+  \item Detect file extension.
+  \item Extract text (and OCR where applicable).
+  \item Return a list of document dicts with fields: content, source, page (if applicable), type, timestamp.
+  \item Downstream chunker splits \texttt{content}.
+\end{enumerate}
+
+\subsection{Notes and Tips}
+\begin{itemize}
+  \item OCR may be slow; ensure Tesseract is installed (Dockerfile includes it).
+  \item Large PDFs: consider limiting pages or pre-processing.
+  \item Encoding: loader opens text with UTF-8.
+\end{itemize}
+
+\newpage
+\section{Chunking and Embeddings}
+\subsection{Chunking}
+\begin{itemize}
+  \item Uses RecursiveCharacterTextSplitter (langchain-text-splitters).
+  \item Parameters: CHUNK\_SIZE, CHUNK\_OVERLAP (config-driven).
+  \item Produces overlapping chunks to preserve context.
+\end{itemize}
+
+\subsection{Embeddings}
+\begin{itemize}
+  \item Model: SentenceTransformer (default all-MiniLM-L6-v2).
+  \item Dimension: 384.
+  \item Methods: \texttt{embed\_text}, \texttt{embed\_texts}, \texttt{similarity}.
+  \item Similarity: cosine similarity via dot product / norms.
+\end{itemize}
+
+\subsection{Performance Considerations}
+\begin{itemize}
+  \item Batch embeddings for throughput (\texttt{embed\_texts}).
+  \item Limit chunk size to balance context and speed.
+  \item Cache embeddings for static corpora if needed (not built-in).
+\end{itemize}
+
+\newpage
+\section{Vector Store (Weaviate v4)}
+\subsection{Schema}
+\begin{itemize}
+  \item Collection: \texttt{DocumentChunk}
+  \item Properties: content (text), source (text), chunk\_index (int), doc\_type (text), metadata (text)
+  \item Vectorizer: none (we supply vectors)
+\end{itemize}
+
+\subsection{Operations}
+\begin{description}
+  \item[Init] Connects via \texttt{weaviate.connect\_to\_local(...)}; creates collection if missing.
+  \item[Add] Inserts vectors with properties; returns UUIDs.
+  \item[Query] \texttt{near\_vector} with limit=top\_k; returns properties and distance.
+  \item[Delete] Drops collection and recreates schema.
+  \item[Health] \texttt{is\_ready()} check.
+\end{description}
+
+\subsection{Connectivity}
+\begin{itemize}
+  \item Default URL: http://weaviate:8080 (Docker) or http://localhost:8080 (local).
+  \item If unreachable, system runs in degraded mode (no vector search); standalone demo still works using in-memory similarity (demo script).
+\end{itemize}
+
+\newpage
+\section{LLM Integration (Ollama)}
+\subsection{Purpose}
+\begin{itemize}
+  \item Answer synthesis from retrieved contexts.
+  \item Query decomposition for multi-part questions.
+\end{itemize}
+
+\subsection{Runtime}
+\begin{itemize}
+  \item Service: Ollama (Docker service \texttt{ollama}).
+  \item Model: mistral (pulled by \texttt{ollama-init} or manually \texttt{ollama pull mistral}).
+  \item Base URL: http://ollama:11434 (Docker) or http://localhost:11434 (local).
+\end{itemize}
+
+\subsection{Fallback Behavior}
+\begin{itemize}
+  \item If Ollama is down, the system reports LLM unavailable; semantic search still works (demo/test).
+  \item Query decomposition warnings are logged; answers may be limited to retrieved text without generation (in degraded modes).
+\end{itemize}
+
+\newpage
+\section{FastAPI Service}
+\subsection{Endpoints}
+\begin{description}
+  \item[GET /] Basic info and docs link.
+  \item[GET /health] Returns vector store readiness, LLM availability, system status.
+  \item[POST /ask] Body: \{ query: str, use\_decomposition: bool = true, top\_k: int = 5 \}. Returns answer, contexts used, sub-questions, and errors if any.
+\end{description}
+
+\subsection{Hosting}
+\begin{itemize}
+  \item Run via uvicorn: \texttt{python -m uvicorn src.main:app --host 0.0.0.0 --port 8000}.
+  \item In Docker: handled by \texttt{startup.sh} after health gates.
+\end{itemize}
+
+\newpage
+\section{Testing and Verification}
+\subsection{Key Scripts}
+\begin{itemize}
+  \item \textbf{demo\_qa.py}: Loads sample docs, embeds, runs sample queries, prints top matches and previews.
+  \item \textbf{test\_system.py}: Smoke tests (imports, loader, embeddings, vector store reachability, QA agent health).
+  \item \textbf{final\_test.py}: Comprehensive suite (imports, loading, embeddings, semantic search, Weaviate v4 compatibility, full pipeline).
+  \item \textbf{verify\_docker.py}: Checks Docker installation, docker-compose, service endpoints (Weaviate, Ollama, FastAPI, MLflow).
+\end{itemize}
+
+\subsection{Recent Results}
+\begin{itemize}
+  \item final\_test.py: 6/6 tests passed; semantic search ~0.60--0.67 similarity on sample queries; complete pipeline succeeded.
+  \item demo\_qa.py: 3 docs loaded (6,094 chars); top matches align with query intent.
+\end{itemize}
+
+\newpage
+\section{Deployment: Standalone Mode}
+\subsection{When to Use}
+\begin{itemize}
+  \item Quick local development.
+  \item No Docker available.
+  \item Embedding-only semantic search is sufficient.
+\end{itemize}
+
+\subsection{Commands}
+\begin{lstlisting}[language=bash]
+# Run demo
+python demo_qa.py
+
+# Run basic tests
+python test_system.py
+
+# Run full suite
+python final_test.py
+
+# Launch API (degraded if Weaviate/Ollama absent)
+python -m uvicorn src.main:app --host 0.0.0.0 --port 8000
+\end{lstlisting}
+
+\subsection{Limitations}
+\begin{itemize}
+  \item No vector persistence (unless Weaviate is running separately).
+  \item No LLM generation if Ollama is not running.
+\end{itemize}
+
+\newpage
+\section{Deployment: Docker Full Stack}
+\subsection{When to Use}
+\begin{itemize}
+  \item Need full QA pipeline with vector DB and LLM.
+  \item Team or production-like environments.
+  \item Consistent, reproducible setup.
+\end{itemize}
+
+\subsection{One-Command Startup}
+\begin{lstlisting}[language=bash]
+python start_docker.py
+\end{lstlisting}
+
+\subsection{Manual Startup}
+\begin{lstlisting}[language=bash]
+# Start services
+docker-compose up -d
+
+# Check status
+docker-compose ps
+
+# View logs
+docker-compose logs -f
+\end{lstlisting}
+
+\subsection{Services}
+\begin{itemize}
+  \item weaviate:8080 (vector DB, v4 API)
+  \item ollama:11434 (LLM service, pulls mistral)
+  \item app:8000 (FastAPI)
+  \item mlflow:5000 (tracking)
+  \item ollama-init (one-shot model pull)
+\end{itemize}
+
+\subsection{Health Checks}
+\begin{itemize}
+  \item Weaviate: /v1/.well-known/ready
+  \item Ollama: /api/tags
+  \item App: /health
+  \item MLflow: / (root)
+\end{itemize}
+
+\newpage
+\section{Configuration Details}
+\subsection{Environment Variables}
+\begin{tabularx}{\linewidth}{p{0.25\linewidth}X}
+\toprule
+Variable & Purpose \\
+\midrule
+WEAVIATE\_URL & Weaviate endpoint (default http://localhost:8080) \\
+WEAVIATE\_API\_KEY & API key (if enabled) \\
+LLM\_BASE\_URL & Ollama base URL (default http://localhost:11434) \\
+LLM\_MODEL & Model name (default mistral) \\
+EMBEDDING\_MODEL & SentenceTransformer model (default all-MiniLM-L6-v2) \\
+API\_HOST / API\_PORT & FastAPI host/port (defaults 0.0.0.0:8000) \\
+CHUNK\_SIZE / CHUNK\_OVERLAP & Chunking parameters (defaults 1024 / 100) \\
+\bottomrule
+\end{tabularx}
+
+\subsection{Changing Config}
+\begin{itemize}
+  \item Edit \texttt{src/config.py} defaults, or set environment variables before running.
+  \item For Docker, add env overrides under the \texttt{app} service in \texttt{docker-compose.yml}.
+\end{itemize}
+
+\newpage
+\section{Operational Runbooks}
+\subsection{Common Tasks}
+\begin{description}
+  \item[Start (Docker)] \texttt{docker-compose up -d} or \texttt{python start\_docker.py}
+  \item[Stop] \texttt{docker-compose down}
+  \item[Logs] \texttt{docker-compose logs -f app} (or service-specific)
+  \item[Rebuild app] \texttt{docker-compose up -d --build app}
+  \item[Check health] \texttt{curl http://localhost:8000/health}
+\end{description}
+
+\subsection{Uploading Documents (API)}
+\begin{lstlisting}[language=bash]
+# Single upload
+curl -X POST "http://localhost:8000/upload" \
+  -F "file=@data/machine_learning_guide.txt"
+
+# Batch upload
+curl -X POST "http://localhost:8000/upload-batch" \
+  -F "file=@data/machine_learning_guide.txt" \
+  -F "file=@data/data_science_fundamentals.txt" \
+  -F "file=@data/deep_learning_overview.txt"
+\end{lstlisting}
+
+\subsection{Asking Questions (API)}
+\begin{lstlisting}[language=bash]
+curl -X POST "http://localhost:8000/ask" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is machine learning?",
+    "use_decomposition": true,
+    "top_k": 5
+  }'
+\end{lstlisting}
+
+\newpage
+\section{Troubleshooting}
+\subsection{Docker Not Installed}
+\begin{itemize}
+  \item Install Docker Desktop; rerun \texttt{verify\_docker.py}.
+\end{itemize}
+
+\subsection{Ports in Use}
+\begin{itemize}
+  \item Change port mappings in \texttt{docker-compose.yml} (8080, 11434, 8000, 5000).
+\end{itemize}
+
+\subsection{Weaviate Connection Errors}
+\begin{itemize}
+  \item Ensure service is healthy: \texttt{curl http://localhost:8080/v1/.well-known/ready}.
+  \item Check Docker logs: \texttt{docker-compose logs weaviate}.
+\end{itemize}
+
+\subsection{Ollama Unavailable}
+\begin{itemize}
+  \item Start service: \texttt{docker-compose up -d ollama}.
+  \item Pull model: \texttt{docker exec -it ollama ollama pull mistral}.
+\end{itemize}
+
+\subsection{Slow OCR or PDFs}
+\begin{itemize}
+  \item Limit pages or disable OCR for text-heavy PDFs.
+  \item Ensure poppler and tesseract are installed (in Docker they are).
+\end{itemize}
+
+\subsection{Memory/Performance}
+\begin{itemize}
+  \item Increase Docker resources (CPU/RAM) for embeddings/LLM.
+  \item Reduce CHUNK\_SIZE or top\_k for lighter loads.
+\end{itemize}
+
+\newpage
+\section{Development Practices}
+\subsection{Local Iteration}
+\begin{itemize}
+  \item Use standalone mode for quick cycles.
+  \item Run \texttt{demo\_qa.py} after changes to validate.
+  \item Use \texttt{final\_test.py} before larger merges.
+\end{itemize}
+
+\subsection{Adding a New Loader}
+\begin{enumerate}
+  \item Extend \texttt{DocumentLoader.supported\_formats}.
+  \item Implement a private \_load\_X method returning list of dicts with \texttt{content}.
+  \item Wire into \texttt{load\_documents} dispatch.
+\end{enumerate}
+
+\subsection{Changing Embedding Model}
+\begin{itemize}
+  \item Update EMBEDDING\_MODEL in env or \texttt{src/config.py}.
+  \item Ensure model is supported by sentence-transformers.
+  \item Re-embed documents if using Weaviate.
+\end{itemize}
+
+\subsection{Switching LLM}
+\begin{itemize}
+  \item Update LLM\_MODEL and ensure it is available in Ollama (\texttt{ollama pull <model>}).
+  \item Adjust prompts in \texttt{answer\_synthesizer.py} or \texttt{llm\_interface.py} if needed.
+\end{itemize}
+
+\subsection{API Changes}
+\begin{itemize}
+  \item Modify routes in \texttt{src/main.py}.
+  \item Keep response models (pydantic) in sync for docs.
+  \item Re-run \texttt{final\_test.py}.
+\end{itemize}
+
+\newpage
+\section{Security and Production Notes}
+\begin{itemize}
+  \item Add auth to FastAPI (e.g., API keys, OAuth) for production.
+  \item Use TLS termination with a reverse proxy (nginx/traefik) if exposed.
+  \item Configure Weaviate auth if needed; set WEAVIATE\_API\_KEY and enable on server.
+  \item Resource limits: set Docker CPU/mem limits for predictability.
+  \item Logging and monitoring: integrate with your stack (ELK, Prometheus, etc.).
+\end{itemize}
+
+\newpage
+\section{Appendix A: Commands Cheat-Sheet}
+\subsection{Standalone}
+\begin{lstlisting}[language=bash]
+python demo_qa.py
+python test_system.py
+python final_test.py
+python -m uvicorn src.main:app --host 0.0.0.0 --port 8000
+\end{lstlisting}
+
+\subsection{Docker}
+\begin{lstlisting}[language=bash]
+python start_docker.py
+python verify_docker.py
+docker-compose up -d
+docker-compose down
+docker-compose logs -f app
+\end{lstlisting}
+
+\subsection{Health Checks}
+\begin{lstlisting}[language=bash]
+curl http://localhost:8000/health
+curl http://localhost:8080/v1/.well-known/ready
+curl http://localhost:11434/api/tags
+\end{lstlisting}
+
+\newpage
+\section{Appendix B: File Glossary}
+\begin{tabularx}{\linewidth}{p{0.3\linewidth}X}
+\toprule
+File & Purpose \\
+\midrule
+src/main.py & FastAPI server entrypoint. \\
+src/qa_agent.py & Core orchestration. \\
+src/vector_store.py & Weaviate v4 integration. \\
+src/document_loader.py & Multi-format ingestion. \\
+src/embeddings.py & Embeddings and similarity. \\
+src/llm_interface.py & Ollama client. \\
+src/query_decomposer.py & Sub-question generation. \\
+src/answer_synthesizer.py & Answer assembly and LLM calls. \\
+src/config.py & Central config. \\
+docker-compose.yml & Service orchestration. \\
+Dockerfile & App image build. \\
+startup.sh & Wait-for-services + run app. \\
+init-ollama.sh & Pull mistral model. \\
+start_docker.py & One-command startup. \\
+verify_docker.py & Environment and service checks. \\
+demo_qa.py & Interactive semantic demo. \\
+test_system.py & Smoke tests. \\
+final_test.py & Comprehensive tests. \\
+DOCKER_GUIDE.md & Docker usage. \\
+DOCKER_READY.md & Deployment readiness. \\
+COMPLETION_SUMMARY.md & Changes log. \\
+VERIFICATION_REPORT.txt & Latest verification summary. \\
+QUICK_REFERENCE.md & Quick start guide. \\
+\bottomrule
+\end{tabularx}
+
+\newpage
+\section{Appendix C: Sample API Payloads}
+\subsection{Ask Endpoint}
+\begin{lstlisting}[language=json]
+{
+  "query": "What are the types of machine learning?",
+  "use_decomposition": true,
+  "top_k": 5
+}
+\end{lstlisting}
+
+\subsection{Typical Response}
+\begin{lstlisting}[language=json]
+{
+  "success": true,
+  "query": "What are the types of machine learning?",
+  "answer": "Supervised, unsupervised, and reinforcement learning...",
+  "confidence": 0.74,
+  "sub_questions": [
+    "What is supervised learning?",
+    "What is unsupervised learning?",
+    "What is reinforcement learning?"
+  ],
+  "contexts_used": 3
+}
+\end{lstlisting}
+
+\newpage
+\section{Appendix D: Extending the System}
+\subsection{Add a New Vector Store}
+\begin{enumerate}
+  \item Abstract vector store interface (or add a new class) mirroring add/retrieve/delete/health.
+  \item Implement client init and schema creation.
+  \item Wire into QA agent selection by config flag.
+\end{enumerate}
+
+\subsection{Add Caching}
+\begin{itemize}
+  \item Embed caching layer (e.g., SQLite/Redis) keyed by content hash.
+  \item Cache query embeddings for repeated queries.
+\end{itemize}
+
+\subsection{Improve Answer Quality}
+\begin{itemize}
+  \item Add reranking (cross-encoder) post vector search.
+  \item Use larger context windows; tune chunk size/overlap.
+  \item Add citations from retrieved chunks.
+\end{itemize}
+
+\subsection{Observability}
+\begin{itemize}
+  \item Add structured logging and request IDs.
+  \item Instrument latency metrics for load, embed, search, LLM.
+\end{itemize}
+
+\newpage
+\section{Appendix E: Maintenance Checklist}
+\begin{itemize}
+  \item Keep \texttt{requirements.txt} up to date; pin major versions.
+  \item Periodically re-pull Ollama models if updated.
+  \item Monitor Weaviate storage; prune old objects as needed.
+  \item Re-embed documents if changing embedding model.
+  \item Run \texttt{final\_test.py} before releases.
+\end{itemize}
+
+\newpage
+\section{Conclusion}
+This handbook has outlined the architecture, components, configurations, deployment modes, and operational runbooks for the Document QA System. With the provided scripts, tests, and Docker orchestration, you can develop, run, and extend the system confidently in both local and production-like environments.
+
+\end{document}
